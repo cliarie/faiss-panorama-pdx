@@ -100,6 +100,7 @@ typedef uint64_t size_t;
 #include <faiss/IndexIVFPQR.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/IndexIVFFlatPanorama.h>
+#include <faiss/IndexIVFFlatPanoramaPDX.h>
 #include <faiss/IndexIVFIndependentQuantizer.h>
 
 #include <faiss/IndexFastScan.h>
@@ -542,6 +543,7 @@ void gpu_sync_all_devices()
 
 %include  <faiss/IndexIVFFlat.h>
 %include  <faiss/IndexIVFFlatPanorama.h>
+%include  <faiss/IndexIVFFlatPanoramaPDX.h>
 
 %warnfilter(509) faiss::nsg::Graph< int >::at(int,int);
 
@@ -734,6 +736,7 @@ struct faiss::simd16uint16 {};
     DOWNCAST ( IndexIVFLocalSearchQuantizerFastScan )
     DOWNCAST ( IndexIVFProductResidualQuantizerFastScan )
     DOWNCAST ( IndexIVFProductLocalSearchQuantizerFastScan )
+    DOWNCAST ( IndexIVFFlatPanoramaPDX )
     DOWNCAST ( IndexIVFFlatPanorama )
     DOWNCAST ( IndexIVFFlatDedup )
     DOWNCAST ( IndexIVFFlat )

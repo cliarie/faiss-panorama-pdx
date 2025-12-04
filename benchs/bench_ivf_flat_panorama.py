@@ -17,9 +17,13 @@ except ImportError:
 
 ds = DatasetGIST1M()
 
-xq = ds.get_queries()
-xb = ds.get_database()
-gt = ds.get_groundtruth()
+MAX_DB = 200_000
+MAX_Q = 1_000
+MAX_T = 200_000
+
+xq = ds.get_queries()[:MAX_Q]
+xb = ds.get_database()[:MAX_DB]
+gt = ds.get_groundtruth()[:MAX_Q]
 
 xt = ds.get_train()
 

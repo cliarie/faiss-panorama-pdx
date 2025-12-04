@@ -64,7 +64,7 @@ def eval_recall(index, nprobe_val):
     return recall, qps
 
 
-def eval_and_plot(name, plot=True):
+def eval_and_plot(name, search_threads=None, plot=True):
     index = faiss.index_factory(d, name)
 
     faiss.omp_set_num_threads(mp.cpu_count())
@@ -77,7 +77,7 @@ def eval_and_plot(name, plot=True):
     ivf_index = get_ivf_index(index)
 
     data = []
-    print(f"======{name}")
+    print(f"======{name} with {search_threads} threads")
     for nprobe in 1, 2, 4, 8, 16, 32, 64:
         ivf_index.nprobe = nprobe
         recall, qps = eval_recall(index, nprobe)

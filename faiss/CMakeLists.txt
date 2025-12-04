@@ -88,6 +88,7 @@ set(FAISS_SRC
   invlists/BlockInvertedLists.cpp
   invlists/DirectMap.cpp
   invlists/InvertedLists.cpp
+  invlists/PDXInvertedLists.cpp
   invlists/InvertedListsIOHook.cpp
   utils/Heap.cpp
   utils/NeuralNet.cpp
