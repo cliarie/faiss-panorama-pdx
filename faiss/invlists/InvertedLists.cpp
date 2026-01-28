@@ -460,6 +460,83 @@ InvertedListsIterator* ArrayInvertedListsPanorama::get_iterator(
     return nullptr;
 }
 
+/*******************************************
+ * ArrayInvertedListsPDX Implementation
+ *******************************************/
+
+ArrayInvertedListsPDX::ArrayInvertedListsPDX(
+        size_t nlist,
+        size_t code_size,
+        size_t n_levels)
+        : ArrayInvertedLists(nlist, code_size),
+        n_levels(n_levels), 
+          level_width_floats(((code_size / sizeof(float)) + n_levels - 1) / n_levels),
+          level_width(level_width_floats * sizeof(float)),
+          pano(code_size, n_levels, kBatchSize),
+          pdx(code_size, n_levels, kBatchSize) {
+    FAISS_THROW_IF_NOT(n_levels > 0);
+    FAISS_THROW_IF_NOT(code_size % sizeof(float) == 0);
+    FAISS_ASSERT(level_width % sizeof(float) == 0);
+
+    cum_sums.resize(nlist);
+}
+
+const float* ArrayInvertedListsPDX::get_cum_sums(size_t list_no) const {
+    assert(list_no < nlist);
+    return cum_sums[list_no].data();
+}
+
+size_t ArrayInvertedListsPDX::add_entries(
+    size_t list_no, 
+    size_t n_entry, 
+    const idx_t* ids_in, 
+    const uint8_t* codes_in) {
+    // returns the starting offset in the list before new entries were added for tracking positions
+    size_t o = ids[list_no].size();
+
+    ids[list_no].resize(o + n_entry);
+    memcpy(&ids[list_no][o], ids_in, sizeof(ids_in[0]) * n_entry);
+
+    size_t new_size = o + n_entry;
+    size_t num_batches = (new_size + kBatchSize - 1) / kBatchSize;
+    codes[list_no].resize(num_batches * kBatchSize * code_size);
+    cum_sums[list_no].resize(num_batches * kBatchSize * (n_levels + 1));
+
+    // compute suffix norms (cum sums)
+    const float* vectors = reinterpret_cast<const float*>(codes_in);
+    pano.compute_cumulative_sums(cum_sums[list_no].data(), o, n_entry, vectors);
+    pdx.copy_codes_to_vertical_level_layout(
+            codes[list_no].data(), o, n_entry, codes_in);
+
+    return o;
+}
+
+void ArrayInvertedListsPDX::update_entries(
+    size_t list_no, 
+    size_t offset, 
+    size_t n_entry,
+    const idx_t* ids_in, 
+    const uint8_t* codes_in) {
+    assert(list_no < nlist);
+    assert(n_entry + offset <= ids[list_no].size());
+
+    memcpy(&ids[list_no][offset], ids_in, sizeof(ids_in[0]) * n_entry);
+
+    const float* vectors = reinterpret_cast<const float*>(codes_in);
+    pano.compute_cumulative_sums(cum_sums[list_no].data(), offset, n_entry, vectors);
+    pdx.copy_codes_to_vertical_level_layout(
+            codes[list_no].data(), offset, n_entry, codes_in);
+}
+
+void ArrayInvertedListsPDX::resize(size_t list_no, size_t new_size) {
+    assert(list_no < nlist);
+    ids[list_no].resize(new_size);
+
+    size_t num_batches = (new_size + kBatchSize - 1) / kBatchSize;
+    codes[list_no].resize(num_batches * kBatchSize * code_size);
+    cum_sums[list_no].resize(num_batches * kBatchSize * (n_levels + 1));
+}
+
 /*****************************************************************
  * Meta-inverted list implementations
  *****************************************************************/

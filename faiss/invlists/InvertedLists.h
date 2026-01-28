@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <faiss/MetricType.h>
+#include <faiss/impl/PDXPanorama.h>
 #include <faiss/impl/Panorama.h>
 #include <faiss/impl/maybe_owned_vector.h>
 
@@ -320,6 +321,37 @@ struct ArrayInvertedListsPanorama : ArrayInvertedLists {
 
     /// Frees codes returned by `get_single_code`.
     void release_codes(size_t list_no, const uint8_t* codes) const override;
+};
+
+// Vertical-oriented storage (dimension major)
+struct ArrayInvertedListsPDX : ArrayInvertedLists {
+    static constexpr size_t kBatchSize = 128;
+
+    std::vector<MaybeOwnedVector<float>> cum_sums;
+    const size_t n_levels;
+    const size_t level_width;
+    const size_t level_width_floats;
+    Panorama pano;
+    PDXPanorama pdx;
+
+    ArrayInvertedListsPDX(size_t nlist, size_t code_size, size_t n_levels);
+
+    const float* get_cum_sums(size_t list_no) const;
+
+    size_t add_entries(
+            size_t list_no,
+            size_t n_entry,
+            const idx_t* ids,
+            const uint8_t* code) override;
+
+    void update_entries(
+            size_t list_no,
+            size_t offset,
+            size_t n_entry,
+            const idx_t* ids,
+            const uint8_t* code) override;
+
+    void resize(size_t list_no, size_t new_size) override;
 };
 
 /*****************************************************************
