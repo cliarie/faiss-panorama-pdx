@@ -192,6 +192,7 @@ set(FAISS_HEADERS
   impl/NSG.h
   impl/Panorama.h
   impl/PanoramaStats.h
+  impl/PDXPanorama.h
   impl/PolysemousTraining.h
   impl/ProductQuantizer-inl.h
   impl/ProductQuantizer.h
