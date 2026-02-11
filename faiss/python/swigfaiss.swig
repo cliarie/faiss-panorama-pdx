@@ -100,6 +100,7 @@ typedef uint64_t size_t;
 #include <faiss/IndexIVFPQR.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/IndexIVFFlatPanorama.h>
+#include <faiss/IndexIVFFlatPDX.h>
 #include <faiss/IndexIVFIndependentQuantizer.h>
 
 #include <faiss/IndexFastScan.h>
@@ -173,6 +174,7 @@ typedef uint64_t size_t;
 #include <faiss/utils/NeuralNet.h>
 #include <faiss/impl/Panorama.h>
 #include <faiss/impl/PanoramaStats.h>
+#include <faiss/impl/PDXPanorama.h>
 
 #include <faiss/invlists/BlockInvertedLists.h>
 
@@ -523,6 +525,7 @@ void gpu_sync_all_devices()
 %include  <faiss/impl/CodePacker.h>
 %include  <faiss/impl/Panorama.h>
 %include  <faiss/impl/PanoramaStats.h>
+%include  <faiss/impl/PDXPanorama.h>
 
 %include  <faiss/VectorTransform.h>
 %include  <faiss/IndexPreTransform.h>
@@ -559,6 +562,7 @@ void gpu_sync_all_devices()
 
 %include  <faiss/IndexIVFFlat.h>
 %include  <faiss/IndexIVFFlatPanorama.h>
+%include  <faiss/IndexIVFFlatPDX.h>
 
 %warnfilter(509) faiss::nsg::Graph< int >::at(int,int);
 
@@ -762,6 +766,7 @@ struct faiss::simd16uint16 {};
     DOWNCAST ( IndexIVFProductResidualQuantizerFastScan )
     DOWNCAST ( IndexIVFProductLocalSearchQuantizerFastScan )
     DOWNCAST ( IndexIVFFlatPanorama )
+    DOWNCAST ( IndexIVFFlatPDX )
     DOWNCAST ( IndexIVFFlatDedup )
     DOWNCAST ( IndexIVFFlat )
     DOWNCAST ( IndexIVF )
