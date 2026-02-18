@@ -221,9 +221,9 @@ size_t PDXPanorama::progressive_filter_batch(
     }
 
     size_t total_active = num_active;
+    local_stats.total_dims += total_active * n_levels;
     for (size_t level = 0; level < n_levels; level++) {
         local_stats.total_dims_scanned += num_active;
-        local_stats.total_dims += total_active;
 
         const float query_cum_norm = query_cum_sums[level + 1];
 
