@@ -78,7 +78,8 @@ struct PDXPanorama {
             bool use_sel,
             std::vector<uint32_t>& active_indices,
             std::vector<float>& exact_distances,
-            float threshold) const;
+            float threshold,
+            PanoramaStats& local_stats) const;
 
 private:
     template <MetricType M>
@@ -167,7 +168,8 @@ size_t PDXPanorama::progressive_filter_batch(
     bool use_sel, 
     std::vector<uint32_t>& active_indices, 
     std::vector<float>& exact_distances, 
-    float threshold) const {
+    float threshold,
+    PanoramaStats& local_stats) const {
 
     const size_t batch_start = batch_no * batch_size;
     if (batch_start >= list_size) {
@@ -218,7 +220,11 @@ size_t PDXPanorama::progressive_filter_batch(
         return 0;
     }
 
+    size_t total_active = num_active;
     for (size_t level = 0; level < n_levels; level++) {
+        local_stats.total_dims_scanned += num_active;
+        local_stats.total_dims += total_active;
+
         const float query_cum_norm = query_cum_sums[level + 1];
 
         const size_t level_offset = level * level_width * batch_size;

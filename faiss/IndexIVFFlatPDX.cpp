@@ -12,6 +12,7 @@
 
 #include <faiss/invlists/InvertedLists.h>
 
+#include <faiss/impl/PanoramaStats.h>
 #include <faiss/utils/distances.h>
 #include <faiss/utils/extra_distances.h>
 #include <faiss/utils/utils.h>
@@ -87,6 +88,9 @@ struct IVFFlatScannerPDX : InvertedListScanner {
         std::vector<float> exact_distances(storage->kBatchSize);
         std::vector<uint32_t> active_indices(storage->kBatchSize);
 
+        PanoramaStats local_stats;
+        local_stats.reset();
+
         for (size_t batch_no = 0; batch_no < n_batches; batch_no++) {
             size_t batch_start = batch_no * storage->kBatchSize;
 
@@ -103,7 +107,8 @@ struct IVFFlatScannerPDX : InvertedListScanner {
                         use_sel,
                         active_indices,
                         exact_distances,
-                        simi[0]);
+                        simi[0],
+                        local_stats);
             });
 
             for (size_t i = 0; i < num_active; i++) {
@@ -120,6 +125,7 @@ struct IVFFlatScannerPDX : InvertedListScanner {
             }
         }
 
+        indexPanorama_stats.add(local_stats);
         return nup;
     }
 
@@ -137,6 +143,9 @@ struct IVFFlatScannerPDX : InvertedListScanner {
         std::vector<float> exact_distances(storage->kBatchSize);
         std::vector<uint32_t> active_indices(storage->kBatchSize);
 
+        PanoramaStats local_stats;
+        local_stats.reset();
+
         for (size_t batch_no = 0; batch_no < n_batches; batch_no++) {
             size_t batch_start = batch_no * storage->kBatchSize;
 
@@ -153,7 +162,8 @@ struct IVFFlatScannerPDX : InvertedListScanner {
                         use_sel,
                         active_indices,
                         exact_distances,
-                        radius);
+                        radius,
+                        local_stats);
             });
 
             for (size_t i = 0; i < num_active; i++) {
@@ -168,7 +178,9 @@ struct IVFFlatScannerPDX : InvertedListScanner {
                 }
             }
         }
-    }
+
+        indexPanorama_stats.add(local_stats);
+    };
 };
 
 struct Run_get_InvertedListScanner {

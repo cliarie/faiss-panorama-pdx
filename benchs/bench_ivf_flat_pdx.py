@@ -86,8 +86,8 @@ nlist = 128
 
 plt.figure(figsize=(8, 6), dpi=80)
 
-# IVFFlat
-eval_and_plot(f"PCA{d},IVF{nlist},Flat")
+# # IVFFlat
+# eval_and_plot(f"PCA{d},IVF{nlist},Flat")
 
 # IVFFlatPanorama (with PCA transform to concentrate energy in early dimensions)
 eval_and_plot(f"PCA{d},IVF{nlist},FlatPanorama{nlevels}")
