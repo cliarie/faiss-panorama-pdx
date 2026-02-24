@@ -16,7 +16,7 @@
 
 namespace faiss {
 
-/// PDX vertical layout with dense compaction for progressive filtering.
+/// PDX vertical layout with two-phase progressive filtering.
 ///
 /// Memory layout per batch of `batch_size` vectors (within one inverted list):
 ///
@@ -25,10 +25,14 @@ namespace faiss {
 ///   Each level region: w_level × batch_size floats, stored as
 ///       dim0[vec0 vec1 ... vec_{B-1}]  dim1[vec0 vec1 ... vec_{B-1}]  ...
 ///
-/// All levels use the dense vertical SIMD kernel (broadcast query dim, FMA
-/// across all active candidates). After each level's pruning, survivors' data
-/// for the next level is physically compacted into a dense temporary buffer
-/// so the dense kernel always operates on contiguous slots — no gather/scatter.
+/// Phase 1 (dense, no compaction): While num_active > kCompactThreshold,
+/// run the dense vertical SIMD kernel on all batch_size slots and use
+/// gather-based bound checking to prune the active_indices list.
+/// No data is moved — wasted FMAs on dead slots are cheaper than compaction.
+///
+/// Phase 2 (compacted dense): Once num_active drops below kCompactThreshold,
+/// do a one-time compaction of survivors' remaining data into dense buffers,
+/// then continue with the dense kernel on the smaller compacted set.
 struct PDXPanorama {
     size_t d = 0;
     size_t code_size = 0;
@@ -36,6 +40,8 @@ struct PDXPanorama {
     size_t level_width = 0;
     size_t level_width_floats = 0;
     size_t batch_size = 0;
+
+    static constexpr size_t kCompactThreshold = 96;
 
     explicit PDXPanorama(size_t code_size, size_t n_levels, size_t batch_size)
             : code_size(code_size), n_levels(n_levels), batch_size(batch_size) {
@@ -98,7 +104,7 @@ struct PDXPanorama {
 private:
     // ---------------------------------------------------------------
     // Dense vertical kernel: contiguous loads, broadcast query dim.
-    // Processes `n` contiguous slots starting at exact_distances[0].
+    // Stride is the distance between consecutive vectors for one dim.
     // ---------------------------------------------------------------
 
     template <MetricType M>
@@ -107,9 +113,10 @@ private:
             const float* level_storage,
             size_t w_level,
             size_t n,
+            size_t stride,
             float* exact_distances) {
         for (size_t t = 0; t < w_level; t++) {
-            const float* dim_base = level_storage + t * n;
+            const float* dim_base = level_storage + t * stride;
 
             __m512 qv;
             if constexpr (M == METRIC_INNER_PRODUCT) {
@@ -139,13 +146,103 @@ private:
     }
 
     // ---------------------------------------------------------------
-    // Vectorized bound check on contiguous exact_distances[0..n-1]
-    // and contiguous cum_sums[0..n-1]. Produces a bitmask of which
-    // of the n candidates survive.
-    // Returns: number of survivors written into keep_mask_out.
-    //
-    // Unlike the old compact_active_avx512, this operates on DENSE
-    // contiguous arrays (no gather needed for distances/cumsums).
+    // Vectorized bound check + compressstore compaction (gather-based).
+    // Used in Phase 1 where exact_distances and cum_sums are at
+    // original batch positions (indexed by active_indices).
+    // ---------------------------------------------------------------
+
+    template <typename C, MetricType M>
+    static inline size_t compact_active_avx512(
+            uint32_t* active_indices,
+            const float* exact_distances,
+            const float* level_cum_sums,
+            float query_cum_norm,
+            float threshold,
+            size_t num_active,
+            size_t batch_size) {
+        const __m512 v_threshold = _mm512_set1_ps(threshold);
+        const __m512 v_query_cum_norm = _mm512_set1_ps(query_cum_norm);
+        const __m512 v_two = _mm512_set1_ps(2.0f);
+
+        size_t next_active = 0;
+        size_t i = 0;
+
+        for (; i + 16 <= num_active; i += 16) {
+            __m512i vidx = _mm512_loadu_si512(
+                    reinterpret_cast<const void*>(active_indices + i));
+
+            __m512 v_dist = _mm512_i32gather_ps(vidx, exact_distances, 4);
+            __m512 v_cum = _mm512_i32gather_ps(vidx, level_cum_sums, 4);
+
+            __m512 v_lower;
+            if constexpr (M == METRIC_INNER_PRODUCT) {
+                v_lower = _mm512_fmadd_ps(
+                        v_cum, v_query_cum_norm, v_dist);
+            } else {
+                v_lower = _mm512_fnmadd_ps(
+                        v_two,
+                        _mm512_mul_ps(v_cum, v_query_cum_norm),
+                        v_dist);
+            }
+
+            __mmask16 keep_mask;
+            if constexpr (C::is_max) {
+                keep_mask = _mm512_cmp_ps_mask(
+                        v_lower, v_threshold, _CMP_LT_OS);
+            } else {
+                keep_mask = _mm512_cmp_ps_mask(
+                        v_lower, v_threshold, _CMP_GT_OS);
+            }
+
+            _mm512_mask_compressstoreu_epi32(
+                    active_indices + next_active, keep_mask, vidx);
+            next_active += _mm_popcnt_u32(keep_mask);
+        }
+
+        if (i < num_active) {
+            __mmask16 tail_mask =
+                    (__mmask16)((1u << (num_active - i)) - 1u);
+            __m512i vidx = _mm512_maskz_loadu_epi32(
+                    tail_mask,
+                    reinterpret_cast<const void*>(active_indices + i));
+
+            __m512 v_dist = _mm512_mask_i32gather_ps(
+                    _mm512_setzero_ps(), tail_mask, vidx, exact_distances, 4);
+            __m512 v_cum = _mm512_mask_i32gather_ps(
+                    _mm512_setzero_ps(), tail_mask, vidx, level_cum_sums, 4);
+
+            __m512 v_lower;
+            if constexpr (M == METRIC_INNER_PRODUCT) {
+                v_lower = _mm512_fmadd_ps(
+                        v_cum, v_query_cum_norm, v_dist);
+            } else {
+                v_lower = _mm512_fnmadd_ps(
+                        v_two,
+                        _mm512_mul_ps(v_cum, v_query_cum_norm),
+                        v_dist);
+            }
+
+            __mmask16 keep_mask;
+            if constexpr (C::is_max) {
+                keep_mask = _mm512_cmp_ps_mask(
+                        v_lower, v_threshold, _CMP_LT_OS);
+            } else {
+                keep_mask = _mm512_cmp_ps_mask(
+                        v_lower, v_threshold, _CMP_GT_OS);
+            }
+            keep_mask &= tail_mask;
+
+            _mm512_mask_compressstoreu_epi32(
+                    active_indices + next_active, keep_mask, vidx);
+            next_active += _mm_popcnt_u32(keep_mask);
+        }
+
+        return next_active;
+    }
+
+    // ---------------------------------------------------------------
+    // Dense bound check on contiguous arrays (used in Phase 2).
+    // Returns number of survivors; writes keep_bytes[0..n-1].
     // ---------------------------------------------------------------
 
     template <typename C, MetricType M>
@@ -187,14 +284,12 @@ private:
                         v_lower, v_threshold, _CMP_GT_OS);
             }
 
-            // Store 16 bytes of 0/1 keep decisions
             for (size_t j = 0; j < 16; j++) {
                 keep_bytes[i + j] = (keep_mask >> j) & 1u;
             }
             num_kept += _mm_popcnt_u32(keep_mask);
         }
 
-        // Scalar tail
         for (; i < n; i++) {
             float dist_val = exact_distances[i];
             float cum_val = level_cum_sums[i];
@@ -214,7 +309,6 @@ private:
 
         return num_kept;
     }
-
 };
 
 template <typename C, MetricType M>
@@ -255,9 +349,8 @@ size_t PDXPanorama::progressive_filter_batch(
     const size_t batch_offset = batch_no * batch_size * code_size;
     const uint8_t* storage_base = codes_base + batch_offset;
 
-    // ---- Initialize distances for all vectors in batch ----
-    // active_indices here tracks the mapping from compact position
-    // back to original batch position (for final heap update).
+    // ---- Initialize active set with ID-filtered vectors ----
+    // In Phase 1, exact_distances is indexed by batch position.
     size_t num_active = 0;
     for (size_t i = 0; i < cur_batch_size; i++) {
         const size_t global_idx = batch_start + i;
@@ -268,12 +361,16 @@ size_t PDXPanorama::progressive_filter_batch(
         const float cum_sum = batch_cum_sums[i];
 
         if constexpr (M == METRIC_INNER_PRODUCT) {
-            exact_distances[num_active] = 0.0f;
+            exact_distances[i] = 0.0f;
         } else {
-            exact_distances[num_active] = cum_sum * cum_sum + q_norm;
+            exact_distances[i] = cum_sum * cum_sum + q_norm;
         }
 
         num_active += include;
+    }
+
+    for (size_t i = cur_batch_size; i < batch_size; i++) {
+        exact_distances[i] = 0.0f;
     }
 
     if (num_active == 0) {
@@ -283,43 +380,12 @@ size_t PDXPanorama::progressive_filter_batch(
     size_t total_active = num_active;
     local_stats.total_dims += total_active * n_levels;
 
-    // Temporary buffers for compaction (reused across levels).
-    // compact_level_buf: compacted vertical data for the current level.
-    // cum_buf_a / cum_buf_b: ping-pong buffers for cum_sums to avoid
-    //   read/write overlap during in-place compaction.
-    // keep_bytes: 0/1 for each candidate after bound check.
-    std::vector<float> compact_level_buf(level_width_floats * batch_size);
-    std::vector<float> cum_buf_a(n_levels * batch_size);
-    std::vector<float> cum_buf_b(n_levels * batch_size);
-    std::vector<uint8_t> keep_bytes(batch_size);
-
-    float* cum_src = cum_buf_a.data();
-    float* cum_dst = cum_buf_b.data();
-
-    // Gather initial cum_sums for active candidates from original storage.
-    // cum_sums layout: level_cum_sums[level * batch_size + pos_in_batch]
-    for (size_t i = 0; i < num_active; i++) {
-        uint32_t orig = active_indices[i];
-        for (size_t lv = 0; lv < n_levels; lv++) {
-            cum_src[lv * num_active + i] =
-                    level_cum_sums[lv * batch_size + orig];
-        }
-    }
-
-    // Gather level 0's vertical data for active candidates.
-    const float* level0_storage =
-            reinterpret_cast<const float*>(storage_base);
-    const size_t w0 = std::min(level_width_floats, d);
-    for (size_t t = 0; t < w0; t++) {
-        for (size_t i = 0; i < num_active; i++) {
-            uint32_t orig = active_indices[i];
-            compact_level_buf[t * num_active + i] =
-                    level0_storage[t * batch_size + orig];
-        }
-    }
-
-    // ---- Process all levels with dense kernel + compaction ----
-    for (size_t level = 0; level < n_levels; level++) {
+    // ============================================================
+    // Phase 1: Dense vertical kernel on full batch, gather-based
+    // bound check. No data compaction — just maintain active_indices.
+    // ============================================================
+    size_t level = 0;
+    for (; level < n_levels; level++) {
         local_stats.total_dims_scanned += num_active;
 
         const float query_cum_norm = query_cum_sums[level + 1];
@@ -327,15 +393,108 @@ size_t PDXPanorama::progressive_filter_batch(
         const size_t w_level = std::min(level_width_floats, d - start_dim);
         const float* query_level = query + start_dim;
 
-        // Dense vertical kernel on compacted data.
+        const float* level_storage = reinterpret_cast<const float*>(
+                storage_base + level * level_width * batch_size);
+
+        // Dense kernel on all batch_size slots (stride = batch_size).
+        update_distances_dense_avx512<M>(
+                query_level,
+                level_storage,
+                w_level,
+                batch_size,
+                batch_size,
+                exact_distances.data());
+
+        // Gather-based bound check + compressstore compaction of indices.
+        num_active = compact_active_avx512<C, M>(
+                active_indices.data(),
+                exact_distances.data(),
+                level_cum_sums,
+                query_cum_norm,
+                threshold,
+                num_active,
+                batch_size);
+
+        level_cum_sums += batch_size;
+        if (num_active == 0) {
+            return 0;
+        }
+
+        // Check if we should switch to Phase 2.
+        if (num_active <= kCompactThreshold && level + 1 < n_levels) {
+            level++;
+            break;
+        }
+    }
+
+    // If all levels done in Phase 1, return with batch-position indexing.
+    if (level >= n_levels) {
+        return num_active;
+    }
+
+    // ============================================================
+    // Phase 2: One-time compaction, then dense kernel on compact set.
+    // Compact survivors' exact_distances, cum_sums, and vertical data
+    // for remaining levels into dense buffers.
+    // ============================================================
+
+    // Allocate compact buffers.
+    std::vector<float> compact_level_buf(level_width_floats * num_active);
+    std::vector<float> cum_buf_a(
+            (n_levels - level) * num_active);
+    std::vector<float> cum_buf_b(
+            (n_levels - level) * num_active);
+    std::vector<uint8_t> keep_bytes(num_active);
+
+    float* cum_src = cum_buf_a.data();
+    float* cum_dst = cum_buf_b.data();
+
+    const size_t remaining_levels = n_levels - level;
+
+    // Compact exact_distances, cum_sums, and current level's data.
+    const float* cur_level_storage = reinterpret_cast<const float*>(
+            storage_base + level * level_width * batch_size);
+    const size_t cur_start_dim = level * level_width_floats;
+    const size_t w_cur = std::min(level_width_floats, d - cur_start_dim);
+
+    for (size_t i = 0; i < num_active; i++) {
+        uint32_t orig = active_indices[i];
+
+        // Compact exact_distances from batch position to dense position.
+        exact_distances[i] = exact_distances[orig];
+
+        // Compact cum_sums for remaining levels.
+        for (size_t lv = 0; lv < remaining_levels; lv++) {
+            cum_src[lv * num_active + i] =
+                    level_cum_sums[lv * batch_size + orig];
+        }
+
+        // Compact current level's vertical data.
+        for (size_t t = 0; t < w_cur; t++) {
+            compact_level_buf[t * num_active + i] =
+                    cur_level_storage[t * batch_size + orig];
+        }
+    }
+
+    // Process remaining levels in Phase 2.
+    for (size_t lv_offset = 0; level < n_levels; level++, lv_offset++) {
+        local_stats.total_dims_scanned += num_active;
+
+        const float query_cum_norm = query_cum_sums[level + 1];
+        const size_t start_dim = level * level_width_floats;
+        const size_t w_level = std::min(level_width_floats, d - start_dim);
+        const float* query_level = query + start_dim;
+
+        // Dense vertical kernel on compacted data (stride = num_active).
         update_distances_dense_avx512<M>(
                 query_level,
                 compact_level_buf.data(),
                 w_level,
                 num_active,
+                num_active,
                 exact_distances.data());
 
-        // Dense bound check — contiguous arrays, no gather needed.
+        // Dense bound check — contiguous arrays, no gather.
         size_t num_kept = compute_keep_mask_dense<C, M>(
                 exact_distances.data(),
                 cum_src,
@@ -348,8 +507,7 @@ size_t PDXPanorama::progressive_filter_batch(
             return 0;
         }
 
-        // If this is the last level, compact active_indices and
-        // exact_distances for the caller, then return.
+        // Last level: compact active_indices + exact_distances for caller.
         if (level == n_levels - 1) {
             size_t out = 0;
             for (size_t i = 0; i < num_active; i++) {
@@ -363,17 +521,15 @@ size_t PDXPanorama::progressive_filter_batch(
             break;
         }
 
-        // Compact everything for the next level.
+        // Compact for next level.
         const size_t next_level = level + 1;
         const size_t next_start_dim = next_level * level_width_floats;
-        const size_t w_next = std::min(level_width_floats, d - next_start_dim);
-        const size_t remaining_levels = n_levels - next_level;
+        const size_t w_next =
+                std::min(level_width_floats, d - next_start_dim);
+        const size_t next_remaining = n_levels - next_level;
 
-        // Read next level's vertical data from original storage.
-        const size_t next_level_offset =
-                next_level * level_width * batch_size;
         const float* next_level_storage = reinterpret_cast<const float*>(
-                storage_base + next_level_offset);
+                storage_base + next_level * level_width * batch_size);
 
         size_t out = 0;
         for (size_t i = 0; i < num_active; i++) {
@@ -384,17 +540,13 @@ size_t PDXPanorama::progressive_filter_batch(
             exact_distances[out] = exact_distances[i];
             active_indices[out] = active_indices[i];
 
-            // Compact cum_sums for remaining levels into dst buffer.
-            // Source: cum_src[(lv+1) * num_active + i] (skip consumed level).
-            // Dest:   cum_dst[lv * num_kept + out].
-            for (size_t lv = 0; lv < remaining_levels; lv++) {
+            // Compact cum_sums: skip consumed level.
+            for (size_t lv = 0; lv < next_remaining; lv++) {
                 cum_dst[lv * num_kept + out] =
                         cum_src[(lv + 1) * num_active + i];
             }
 
             // Compact next level's vertical data from original storage.
-            // Source: next_level_storage[t * batch_size + orig_batch_pos]
-            // Dest:   compact_level_buf[t * num_kept + out]
             uint32_t orig = active_indices[i];
             for (size_t t = 0; t < w_next; t++) {
                 compact_level_buf[t * num_kept + out] =
@@ -405,9 +557,18 @@ size_t PDXPanorama::progressive_filter_batch(
         }
 
         num_active = num_kept;
-
-        // Swap ping-pong buffers.
         std::swap(cum_src, cum_dst);
+    }
+
+    // Phase 2 returns with dense-position indexing for exact_distances.
+    // Scatter back to batch positions for caller compatibility.
+    // Use a temp buffer to avoid overwrites.
+    std::vector<float> tmp_dist(num_active);
+    for (size_t i = 0; i < num_active; i++) {
+        tmp_dist[i] = exact_distances[i];
+    }
+    for (size_t i = 0; i < num_active; i++) {
+        exact_distances[active_indices[i]] = tmp_dist[i];
     }
 
     return num_active;
