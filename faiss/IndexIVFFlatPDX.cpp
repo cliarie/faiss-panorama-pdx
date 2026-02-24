@@ -114,7 +114,7 @@ struct IVFFlatScannerPDX : InvertedListScanner {
             for (size_t i = 0; i < num_active; i++) {
                 uint32_t idx = active_indices[i];
                 size_t global_idx = batch_start + idx;
-                float dis = exact_distances[idx];
+                float dis = exact_distances[i];
 
                 if (C::cmp(simi[0], dis)) {
                     int64_t id = store_pairs ? lo_build(list_no, global_idx)
@@ -169,7 +169,7 @@ struct IVFFlatScannerPDX : InvertedListScanner {
             for (size_t i = 0; i < num_active; i++) {
                 uint32_t idx = active_indices[i];
                 size_t global_idx = batch_start + idx;
-                float dis = exact_distances[idx];
+                float dis = exact_distances[i];
 
                 if (C::cmp(radius, dis)) {
                     int64_t id = store_pairs ? lo_build(list_no, global_idx)
