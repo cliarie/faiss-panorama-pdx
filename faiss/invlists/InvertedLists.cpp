@@ -505,7 +505,7 @@ size_t ArrayInvertedListsPDX::add_entries(
     // compute suffix norms (cum sums)
     const float* vectors = reinterpret_cast<const float*>(codes_in);
     pano.compute_cumulative_sums(cum_sums[list_no].data(), o, n_entry, vectors);
-    pdx.copy_codes_to_vertical_level_layout(
+    pdx.copy_codes_to_hybrid_layout(
             codes[list_no].data(), o, n_entry, codes_in);
 
     return o;
@@ -524,7 +524,7 @@ void ArrayInvertedListsPDX::update_entries(
 
     const float* vectors = reinterpret_cast<const float*>(codes_in);
     pano.compute_cumulative_sums(cum_sums[list_no].data(), offset, n_entry, vectors);
-    pdx.copy_codes_to_vertical_level_layout(
+    pdx.copy_codes_to_hybrid_layout(
             codes[list_no].data(), offset, n_entry, codes_in);
 }
 
